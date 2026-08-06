@@ -19,6 +19,7 @@ NDTensors) for the MoE NcclEP communication strategy. Per-step dispatch handles
 are created in ``communication/nccl_ep.py``.
 """
 
+import os
 from typing import Optional
 
 import torch
@@ -132,7 +133,24 @@ class NcclEpContext:
         self.max_tokens_per_rank = max_tokens_per_rank
         self.max_top_k = max_top_k
         self.hidden_size = hidden_size
-        self.layout = Layout.RANK_MAJOR if layout is None else Layout(layout)
+        # EFA/non-IBGDA fabrics: the LOW_LATENCY device-initiated path faults
+        # (CUDA illegal memory access at first dispatch); HIGH_THROUGHPUT + FLAT
+        # is the working tuple there. TRTLLM_NCCL_EP_ALGO selects the algorithm
+        # (default LOW_LATENCY = unchanged behavior); when it is HIGH_THROUGHPUT
+        # and no explicit layout was requested, default the layout to FLAT (HT
+        # asserts on RANK_MAJOR).
+        self._ep_algorithm = (
+            Algorithm.HIGH_THROUGHPUT
+            if os.environ.get("TRTLLM_NCCL_EP_ALGO", "LOW_LATENCY").upper()
+            in ("HIGH_THROUGHPUT", "HT")
+            else Algorithm.LOW_LATENCY
+        )
+        if layout is not None:
+            self.layout = Layout(layout)
+        elif self._ep_algorithm == Algorithm.HIGH_THROUGHPUT:
+            self.layout = Layout.FLAT
+        else:
+            self.layout = Layout.RANK_MAJOR
         self.max_recv_tokens = self.ep_size * max_tokens_per_rank
 
         # topk_idx dtype passed to the EP runtime. NCCL-EP < 0.2 asserts
@@ -197,7 +215,7 @@ class NcclEpContext:
         )
 
         cfg = GroupConfig(
-            algorithm=Algorithm.LOW_LATENCY,
+            algorithm=self._ep_algorithm,
             num_experts=num_experts,
             max_dispatch_tokens_per_rank=max_tokens_per_rank,
             max_recv_tokens_per_rank=self.max_recv_tokens,
