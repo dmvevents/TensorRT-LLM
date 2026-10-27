@@ -141,9 +141,10 @@ class NcclEpContext:
     """Long-lived NCCL EP group + receive buffers, shared across NcclEP instances.
 
     Owns the :class:`nccl.ep.Group`, the source :class:`nccl.core.Communicator`,
-    and the rank-major LL persistent receive buffers (tokens, top-k idx / weights,
+    and the persistent receive buffers (tokens, top-k idx / weights,
     per-source-rank counter, optional FP8 scales) wrapped as
-    :class:`nccl.ep.Tensor` descriptors.
+    :class:`nccl.ep.Tensor` descriptors. LOW_LATENCY (default) uses rank-major
+    3D buffers; HIGH_THROUGHPUT (``TRTLLM_NCCL_EP_ALGO``) uses flat 2D buffers.
 
     Per-step routing handles (``Handle``) are created in ``NcclEP``, not here.
     """
@@ -159,6 +160,8 @@ class NcclEpContext:
         layout: Optional[int] = None,
         external_fp8: bool = False,
         external_nvfp4: bool = False,
+        *,
+        high_throughput: Optional[bool] = None,
     ):
         import nccl.core as nccl_core
         from nccl.ep import (
@@ -190,11 +193,13 @@ class NcclEpContext:
         # is the working tuple there. TRTLLM_NCCL_EP_ALGO selects the algorithm
         # (default LOW_LATENCY = unchanged behavior); when it is HIGH_THROUGHPUT
         # and no explicit layout was requested, default the layout to FLAT (HT
-        # asserts on RANK_MAJOR). The env var is read once here; all later
-        # dispatch/combine decisions branch on this stored value.
-        self._ep_algorithm = (
-            Algorithm.HIGH_THROUGHPUT if _env_selects_high_throughput() else Algorithm.LOW_LATENCY
-        )
+        # asserts on RANK_MAJOR). get_nccl_ep_context samples the env var once and
+        # passes it in, so the cache key and this context agree; a direct
+        # construction reads it here. All later dispatch/combine decisions
+        # branch on this stored value.
+        if high_throughput is None:
+            high_throughput = _env_selects_high_throughput()
+        self._ep_algorithm = Algorithm.HIGH_THROUGHPUT if high_throughput else Algorithm.LOW_LATENCY
         # Env-independent algorithm flag for call-time branching in
         # dispatch/combine (avoids re-reading TRTLLM_NCCL_EP_ALGO after the
         # buffers below are already shaped by this value).
@@ -576,6 +581,7 @@ def get_nccl_ep_context(
             layout,
             external_fp8,
             external_nvfp4,
+            high_throughput=high_throughput,
         )
     _ep_group_refcounts[key] = _ep_group_refcounts.get(key, 0) + 1
     return _ep_group_cache[key]

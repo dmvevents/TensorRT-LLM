@@ -49,7 +49,11 @@ _NCCL_RUNTIME_ERRORS = (RuntimeError, OSError)
 
 
 class NcclEP(Communication):
-    """NCCL EP Low-Latency rank-major communication strategy for MoE expert parallelism."""
+    """NCCL EP communication strategy for MoE expert parallelism.
+
+    LOW_LATENCY rank-major by default; HIGH_THROUGHPUT + FLAT when
+    ``TRTLLM_NCCL_EP_ALGO`` selects it (see ``NcclEpContext``).
+    """
 
     def __init__(
         self,
@@ -414,9 +418,11 @@ class NcclEP(Communication):
         final_hidden_states: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
-        """Combine MoE-reduced rank-major output back to the home rank.
+        """Combine MoE-reduced output back to the home rank.
 
         Input: [max_recv_tokens, hidden] -- already weighted per-row by fused_moe.
+        LOW_LATENCY combines the 3D rank-major view of it; HIGH_THROUGHPUT
+        combines the flat 2D stream.
         Output: [num_tokens, hidden] -- combined to original token order.
         """
         from nccl.ep import (
@@ -462,6 +468,12 @@ class NcclEP(Communication):
                 raise ValueError(
                     f"combine input shape={tuple(final_hidden_states.shape)} "
                     f"expected={expected_shape}"
+                )
+            # HT+FLAT combine takes the flat [max_recv_tokens, hidden] stream
+            # (max_recv_tokens == ep_size * max_tokens_per_rank).
+            if ctx.is_high_throughput:
+                final_hidden_states = final_hidden_states.reshape(
+                    self.max_recv_tokens, self.hidden_size
                 )
         else:
             raise ValueError(
