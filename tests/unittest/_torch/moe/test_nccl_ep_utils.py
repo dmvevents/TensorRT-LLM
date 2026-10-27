@@ -45,6 +45,7 @@ _UNIQUE_ID = b"nccl-unique-id"
 
 class _Algorithm(enum.Enum):
     LOW_LATENCY = 1
+    HIGH_THROUGHPUT = 2
 
 
 class _Layout(enum.IntEnum):
